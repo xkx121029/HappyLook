@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=6,user-scalable=yes">
+<title>文档</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --paper: #ffffff;
+    --ink: #1c1b19;
+    --backdrop: #f2efe8;
+    --muted: #6e6a62;
+    --accent: #b23a2e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #1b1a16;
+      --ink: #e7e3d8;
+      --backdrop: #100f0c;
+      --muted: #a09a8e;
+      --accent: #e98c7c;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--backdrop); }
+  body {
+    font-family: -apple-system, "Noto Sans SC", "PingFang SC", system-ui, sans-serif;
+    color: var(--ink);
+    -webkit-text-size-adjust: 100%;
+  }
+  /* 顶部留出浮动信息条的高度，首屏内容不被挡住 */
+  #mount { padding: 92px 0 48px; }
+  #mount > div {
+    background: transparent !important;
+    padding: 0 !important;
+  }
+  /* docx-preview 输出的 section 自带 A4 白底，这里换成纸色并做成卡片 */
+  #mount section.docx {
+    box-shadow: 0 1px 2px rgba(0,0,0,.28), 0 8px 24px rgba(0,0,0,.10);
+    margin: 12px auto !important;
+    border-radius: 3px;
+    background: var(--paper) !important;
+  }
+  #status {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    font-size: 13px; color: var(--muted); text-align: center;
+    background: linear-gradient(to top, var(--backdrop) 62%, transparent);
+    transition: opacity .18s ease-out;
+    pointer-events: none;
+  }
+  #status.hide { opacity: 0; }
+  #fail {
+    display: none; padding: 56px 28px; text-align: center; font-size: 15px; line-height: 1.7;
+    color: var(--muted);
+  }
+  img { max-width: 100%; height: auto; }
+</style>
+</head>
+<body>
+<div id="mount"></div>
+<div id="fail"></div>
+<div id="status">正在解析文档…</div>
+
+<script src="./lib/jszip.min.js"></script>
+<script src="./lib/docx-preview.min.js"></script>
+<script>
+const statusEl = document.getElementById('status');
+const mount = document.getElementById('mount');
+const failEl = document.getElementById('fail');
+
+function fail(text) {
+  statusEl.classList.add('hide');
+  failEl.style.display = 'block';
+  failEl.textContent = text;
+}
+
+async function main() {
+  const url = new URL('file', location.href).href;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('读取文件失败');
+  const buf = await res.arrayBuffer();
+
+  await docx.renderAsync(buf, mount, null, {
+    className: 'docx',
+    inWrapper: true,
+    ignoreWidth: false,
+    ignoreHeight: false,
+    ignoreFonts: false,
+    breakPages: true,
+    renderHeaders: true,
+    renderFooters: true,
+    renderFootnotes: true,
+    renderEndnotes: true,
+    useBase64URL: true,
+    experimental: true,
+  });
+
+  statusEl.classList.add('hide');
+  // 表格在窄屏会撑破，统一包一层横向滚动
+  mount.querySelectorAll('table').forEach(t => {
+    if (t.parentElement.classList.contains('table-scroll')) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'table-scroll';
+    wrap.style.overflowX = 'auto';
+    t.before(wrap);
+    wrap.appendChild(t);
+  });
+}
+
+main().catch(err => {
+  console.error(err);
+  fail('无法解析这个 Word 文档。\n' + String(err && err.message || err));
+});
+</script>
+</body>
+</html>

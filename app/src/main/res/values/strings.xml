@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">悦览</string>
+    <string name="open_with_label">用悦览打开</string>
+    <string name="share_target_label">送到悦览预览</string>
+</resources>

@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=6,user-scalable=yes">
+<title>电子书</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --paper: #fbfaf7;
+    --ink: #22211e;
+    --muted: #77726a;
+    --line: rgba(0,0,0,.10);
+    --accent: #b23a2e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #14130f;
+      --ink: #ddd8cc;
+      --muted: #979184;
+      --line: rgba(255,255,255,.12);
+      --accent: #e98c7c;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--paper); }
+  body {
+    color: var(--ink);
+    font-family: -apple-system, "Noto Serif SC", "Songti SC", Georgia, serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  #book {
+    max-width: 660px; margin: 0 auto;
+    padding: 88px 24px calc(56px + env(safe-area-inset-bottom));
+    font-size: 17px; line-height: 1.86;
+  }
+  #book h1, #book h2, #book h3 {
+    line-height: 1.4; font-weight: 600; margin: 1.6em 0 .7em;
+  }
+  #book h1 { font-size: 1.6em; margin-top: .2em; }
+  #book h2 { font-size: 1.28em; }
+  #book p { margin: .9em 0; text-align: justify; }
+  #book img { max-width: 100%; height: auto; }
+  #book blockquote { margin: 1em 0; padding-left: 1em; border-left: 2px solid var(--line); color: var(--muted); }
+  #book a { color: var(--accent); text-decoration: none; }
+  /* 章节之间的分隔：一条细线加留白，不用分页符 */
+  .chapter + .chapter { margin-top: 3.4em; padding-top: 2.2em; border-top: 1px solid var(--line); }
+  #nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 30;
+    display: flex; align-items: center; gap: 10px;
+    padding: calc(10px + env(safe-area-inset-top)) 18px 10px;
+    background: color-mix(in srgb, var(--paper) 94%, transparent);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--line);
+    font-family: -apple-system, "Noto Sans SC", system-ui, sans-serif;
+    transition: transform .2s cubic-bezier(.23,1,.32,1);
+  }
+  #nav.hidden { transform: translateY(-100%); }
+  #nav select {
+    flex: 1; appearance: none; border: 0; background: transparent;
+    color: var(--ink); font-size: 14px; font-family: inherit;
+    padding: 4px 0; outline: none;
+  }
+  #progress {
+    position: fixed; left: 0; top: 0; height: 2px; z-index: 40;
+    background: var(--accent); width: 0;
+    transition: width .12s linear;
+  }
+  #status {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    font-size: 13px; color: var(--muted); text-align: center;
+    background: linear-gradient(to top, var(--paper) 62%, transparent);
+    transition: opacity .18s ease-out; pointer-events: none;
+    font-family: -apple-system, "Noto Sans SC", system-ui, sans-serif;
+  }
+  #status.hide { opacity: 0; }
+  #fail { display: none; padding: 56px 28px; text-align: center; font-size: 15px; line-height: 1.7; color: var(--muted); font-family: sans-serif; }
+</style>
+</head>
+<body>
+<div id="progress"></div>
+<div id="nav"><select id="toc"></select></div>
+<div id="book"></div>
+<div id="fail"></div>
+<div id="status">正在解包…</div>
+
+<script src="./lib/jszip.min.js"></script>
+<script>
+const bookEl = document.getElementById('book');
+const navEl = document.getElementById('nav');
+const tocEl = document.getElementById('toc');
+const statusEl = document.getElementById('status');
+const failEl = document.getElementById('fail');
+const progressEl = document.getElementById('progress');
+
+function fail(text) {
+  statusEl.classList.add('hide');
+  failEl.style.display = 'block';
+  failEl.textContent = text;
+}
+function say(t) { statusEl.textContent = t; statusEl.classList.remove('hide'); }
+
+function resolvePath(base, relative) {
+  const stack = base.split('/').filter(Boolean);
+  for (const seg of relative.split('/')) {
+    if (seg === '.' || seg === '') continue;
+    if (seg === '..') stack.pop();
+    else stack.push(seg);
+  }
+  return stack.join('/');
+}
+
+const MIME = {
+  css: 'text/css', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+  gif: 'image/gif', svg: 'image/svg+xml', webp: 'image/webp',
+  ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2',
+};
+
+async function main() {
+  const url = new URL('file', location.href).href;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('读取文件失败');
+  const buf = await res.arrayBuffer();
+  const zip = await JSZip.loadAsync(buf);
+
+  // 找 OPF：先看 META-INF/container.xml，找不到就全盘搜 .opf
+  let opfPath = null;
+  const container = zip.file('META-INF/container.xml');
+  if (container) {
+    const xml = await container.async('string');
+    const m = xml.match(/full-path="([^"]+)"/i);
+    if (m) opfPath = m[1];
+  }
+  if (!opfPath) {
+    const cand = Object.keys(zip.files).find(n => /\.opf$/i.test(n));
+    if (cand) opfPath = cand;
+  }
+  if (!opfPath) throw new Error('这个 EPUB 里找不到内容清单');
+
+  const opfDir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/')) : '';
+  const opfText = await zip.file(opfPath).async('string');
+  const opf = new DOMParser().parseFromString(opfText, 'application/xml');
+
+  // manifest: id -> {href, type}
+  const manifest = {};
+  opf.querySelectorAll('manifest > item').forEach(item => {
+    manifest[item.getAttribute('id')] = {
+      href: resolvePath(opfDir, item.getAttribute('href')),
+      type: item.getAttribute('media-type') || '',
+    };
+  });
+
+  // spine: 阅读顺序
+  const spine = [];
+  opf.querySelectorAll('spine > itemref').forEach(ref => {
+    const item = manifest[ref.getAttribute('idref')];
+    if (item && /html|xml/.test(item.type)) spine.push(item.href);
+  });
+  if (!spine.length) {
+    Object.values(manifest).forEach(i => { if (/html/.test(i.type)) spine.push(i.href); });
+  }
+  if (!spine.length) throw new Error('这个 EPUB 没有可读的章节');
+
+  // 标题：从 OPF metadata 拿书名
+  const titleEl = opf.querySelector('metadata > *|metadata title');
+  const bookTitle = (opf.getElementsByTagName('dc:title')[0] || {}).textContent || '';
+
+  // 目录：优先 nav.xhtml，退到 ncx
+  const chapters = [];
+  for (const href of spine) {
+    let label = '';
+    try {
+      const html = await zip.file(href).async('string');
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const h = doc.querySelector('h1, h2, h3, title');
+      label = h ? h.textContent.trim().slice(0, 60) : '';
+    } catch (e) { /* 章节读不出来就留空标题 */ }
+    chapters.push({ href, label: label || `第 ${chapters.length + 1} 节` });
+  }
+
+  tocEl.innerHTML = '';
+  if (bookTitle) {
+    const o = document.createElement('option');
+    o.textContent = bookTitle;
+    o.disabled = true;
+    tocEl.appendChild(o);
+  }
+  chapters.forEach((c, i) => {
+    const o = document.createElement('option');
+    o.value = String(i);
+    o.textContent = c.label;
+    tocEl.appendChild(o);
+  });
+  tocEl.selectedIndex = bookTitle ? 1 : 0;
+  tocEl.onchange = () => {
+    const target = bookEl.querySelector(`[data-chapter="${tocEl.value}"]`);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  // 逐章渲染：图片和样式表先转成 data URL，页面没有外链可依赖
+  say('正在排版…');
+  for (let i = 0; i < chapters.length; i++) {
+    const c = chapters[i];
+    const entry = zip.file(c.href);
+    if (!entry) continue;
+    let html = await entry.async('string');
+    const dir = c.href.includes('/') ? c.href.slice(0, c.href.lastIndexOf('/')) : '';
+
+    // 把 <img src> 与 <link href> 换成内联数据
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    doc.querySelectorAll('img[src]').forEach(async img => { /* 下面统一处理 */ });
+
+    const imgList = Array.from(doc.querySelectorAll('img'));
+    for (const img of imgList) {
+      const src = img.getAttribute('src');
+      if (!src || /^data:/.test(src)) continue;
+      const path = resolvePath(dir, src);
+      const f = zip.file(path) || zip.file(decodeURIComponent(path));
+      if (!f) { img.remove(); continue; }
+      const ext = path.split('.').pop().toLowerCase();
+      const b64 = await f.async('base64');
+      img.setAttribute('src', `data:${MIME[ext] || 'image/png'};base64,${b64}`);
+    }
+
+    const linkList = Array.from(doc.querySelectorAll('link[rel="stylesheet"]'));
+    let css = '';
+    for (const link of linkList) {
+      const href = link.getAttribute('href');
+      const path = resolvePath(dir, href);
+      const f = zip.file(path);
+      if (f) css += await f.async('string');
+      link.remove();
+    }
+    // 字体也内联，避免有些书依赖自定义字体
+    const fontFaces = [];
+    doc.querySelectorAll('style').forEach(s => { css += s.textContent; s.remove(); });
+
+    const section = document.createElement('section');
+    section.className = 'chapter';
+    section.dataset.chapter = String(i);
+    // 只取 body 内容，丢掉原文档的 head
+    section.innerHTML = doc.body ? doc.body.innerHTML : html;
+    if (css) {
+      const style = document.createElement('style');
+      style.textContent = css;
+      section.prepend(style);
+    }
+    bookEl.appendChild(section);
+  }
+
+  statusEl.classList.add('hide');
+
+  // 滚动时更新进度与目录，并让顶部条在往下滚时收起
+  let lastY = 0;
+  const onScroll = () => {
+    const max = document.body.scrollHeight - window.innerHeight;
+    progressEl.style.width = max > 0 ? `${(window.scrollY / max) * 100}%` : '0';
+    if (window.scrollY > lastY + 8 && window.scrollY > 100) navEl.classList.add('hidden');
+    else if (window.scrollY < lastY - 8) navEl.classList.remove('hidden');
+    lastY = window.scrollY;
+
+    // 当前章节同步到下拉框
+    const sections = bookEl.querySelectorAll('.chapter');
+    let current = 0;
+    sections.forEach((s, idx) => {
+      if (s.getBoundingClientRect().top <= 120) current = idx;
+    });
+    const offset = bookTitle ? 1 : 0;
+    if (tocEl.selectedIndex !== current + offset) tocEl.selectedIndex = current + offset;
+  };
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+}
+
+main().catch(err => {
+  console.error(err);
+  fail('无法打开这本电子书。\n' + String(err && err.message || err));
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=6,user-scalable=yes">
+<title>表格</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --paper: #ffffff;
+    --ink: #1c1b19;
+    --backdrop: #f2efe8;
+    --muted: #6e6a62;
+    --line: rgba(0,0,0,.09);
+    --head: #f2efe8;
+    --accent: #b23a2e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #1b1a16;
+      --ink: #e7e3d8;
+      --backdrop: #100f0c;
+      --muted: #a09a8e;
+      --line: rgba(255,255,255,.10);
+      --head: #262420;
+      --accent: #e98c7c;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--backdrop); }
+  body {
+    font-family: -apple-system, "Noto Sans SC", "PingFang SC", system-ui, sans-serif;
+    color: var(--ink); -webkit-text-size-adjust: 100%;
+    /* 顶部留出浮动信息条的高度 */
+    padding-top: 92px;
+  }
+  #tabs {
+    position: sticky; top: 92px; z-index: 20;
+    display: flex; gap: 4px; overflow-x: auto; padding: 8px 10px;
+    background: color-mix(in srgb, var(--backdrop) 92%, transparent);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: none;
+  }
+  #tabs::-webkit-scrollbar { display: none; }
+  #tabs button {
+    flex: 0 0 auto; border: 0; border-radius: 999px;
+    padding: 7px 14px; font-size: 13px; font-family: inherit;
+    background: transparent; color: var(--muted); cursor: pointer;
+    transition: background .16s ease-out, color .16s ease-out;
+  }
+  #tabs button[aria-selected="true"] {
+    background: var(--accent); color: #fff;
+  }
+  #grid { overflow: auto; padding-bottom: 24px; }
+  table { border-collapse: collapse; font-size: 13px; background: var(--paper); }
+  td, th {
+    border: 1px solid var(--line);
+    padding: 5px 9px;
+    white-space: pre-wrap;
+    min-width: 44px;
+    max-width: 320px;
+    vertical-align: top;
+  }
+  thead th { position: sticky; top: 0; background: var(--head); z-index: 5; font-weight: 600; }
+  tbody th { position: sticky; left: 0; background: var(--head); z-index: 4; font-weight: 500; text-align: right; color: var(--muted); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  #status {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    font-size: 13px; color: var(--muted); text-align: center;
+    background: linear-gradient(to top, var(--backdrop) 62%, transparent);
+    transition: opacity .18s ease-out; pointer-events: none;
+  }
+  #status.hide { opacity: 0; }
+  #fail { display: none; padding: 56px 28px; text-align: center; font-size: 15px; line-height: 1.7; color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="tabs"></div>
+<div id="grid"></div>
+<div id="fail"></div>
+<div id="status">正在解析表格…</div>
+
+<script src="./lib/xlsx.full.min.js"></script>
+<script>
+const statusEl = document.getElementById('status');
+const tabsEl = document.getElementById('tabs');
+const gridEl = document.getElementById('grid');
+const failEl = document.getElementById('fail');
+const MAX_ROWS = 3000;
+const MAX_COLS = 200;
+
+function fail(text) {
+  statusEl.classList.add('hide');
+  failEl.style.display = 'block';
+  failEl.textContent = text;
+}
+
+let workbook = null;
+
+function colName(i) {
+  let s = '';
+  i += 1;
+  while (i > 0) {
+    const m = (i - 1) % 26;
+    s = String.fromCharCode(65 + m) + s;
+    i = Math.floor((i - 1) / 26);
+  }
+  return s;
+}
+
+function renderSheet(name) {
+  const sheet = workbook.Sheets[name];
+  const ref = sheet['!ref'];
+  if (!ref) {
+    gridEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--muted)">这个工作表是空的</div>';
+    return;
+  }
+  const range = XLSX.utils.decode_range(ref);
+  const rows = Math.min(range.e.r - range.s.r + 1, MAX_ROWS);
+  const cols = Math.min(range.e.c - range.s.c + 1, MAX_COLS);
+
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  const hr = document.createElement('tr');
+  hr.appendChild(document.createElement('th'));
+  for (let c = 0; c < cols; c++) {
+    const th = document.createElement('th');
+    th.textContent = colName(range.s.c + c);
+    hr.appendChild(th);
+  }
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  for (let r = 0; r < rows; r++) {
+    const tr = document.createElement('tr');
+    const rh = document.createElement('th');
+    rh.textContent = String(range.s.r + r + 1);
+    tr.appendChild(rh);
+    for (let c = 0; c < cols; c++) {
+      const addr = XLSX.utils.encode_cell({ r: range.s.r + r, c: range.s.c + c });
+      const cell = sheet[addr];
+      const td = document.createElement('td');
+      if (cell) {
+        let v = cell.w != null ? cell.w : cell.v;
+        if (v == null) v = '';
+        td.textContent = typeof v === 'string' ? v : String(v);
+        if (cell.t === 'n') td.classList.add('num');
+        if (cell.s && cell.s.font && cell.s.font.bold) td.style.fontWeight = '600';
+      }
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  gridEl.replaceChildren(table);
+
+  const truncated = (range.e.r - range.s.r + 1) > MAX_ROWS || (range.e.c - range.s.c + 1) > MAX_COLS;
+  if (truncated) {
+    const note = document.createElement('div');
+    note.style.cssText = 'padding:14px;text-align:center;color:var(--muted);font-size:12px';
+    note.textContent = `表格较大，只显示前 ${rows} 行、${cols} 列`;
+    gridEl.appendChild(note);
+  }
+}
+
+function buildTabs() {
+  tabsEl.replaceChildren();
+  workbook.SheetNames.forEach((name, i) => {
+    const b = document.createElement('button');
+    b.textContent = name;
+    b.setAttribute('aria-selected', i === 0 ? 'true' : 'false');
+    b.onclick = () => {
+      tabsEl.querySelectorAll('button').forEach(x => x.setAttribute('aria-selected', 'false'));
+      b.setAttribute('aria-selected', 'true');
+      renderSheet(name);
+      gridEl.scrollTop = 0;
+      gridEl.scrollLeft = 0;
+    };
+    tabsEl.appendChild(b);
+  });
+  tabsEl.style.display = workbook.SheetNames.length > 1 ? 'flex' : 'none';
+}
+
+async function main() {
+  const url = new URL('file', location.href).href;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('读取文件失败');
+  const buf = await res.arrayBuffer();
+  workbook = XLSX.read(new Uint8Array(buf), { type: 'array', cellStyles: true, cellDates: true });
+  if (!workbook.SheetNames.length) throw new Error('没有工作表');
+  buildTabs();
+  renderSheet(workbook.SheetNames[0]);
+  statusEl.classList.add('hide');
+}
+
+main().catch(err => {
+  console.error(err);
+  fail('无法解析这个表格文件。\n' + String(err && err.message || err));
+});
+</script>
+</body>
+</html>

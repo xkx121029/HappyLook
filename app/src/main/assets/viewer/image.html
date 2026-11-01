@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=8,user-scalable=yes">
+<title>图片</title>
+<style>
+  :root { color-scheme: light dark; --backdrop: #f2efe8; }
+  @media (prefers-color-scheme: dark) { :root { --backdrop: #100f0c; } }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--backdrop);
+    display: flex; align-items: center; justify-content: center;
+    overflow: auto;
+  }
+  img {
+    max-width: 100%; max-height: 100%;
+    object-fit: contain;
+    display: block;
+  }
+</style>
+</head>
+<body>
+<img id="pic" alt="">
+<script>
+  // 动图（GIF / 动画 WebP）交给 WebView 自己播，原生 Bitmap 只会显示第一帧
+  document.getElementById('pic').src = new URL('file', location.href).href;
+</script>
+</body>
+</html>

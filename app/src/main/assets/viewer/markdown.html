@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=6,user-scalable=yes">
+<title>Markdown</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --paper: #fbfaf7;
+    --ink: #1c1b19;
+    --muted: #6e6a62;
+    --line: rgba(0,0,0,.10);
+    --code-bg: #f2efe8;
+    --accent: #b23a2e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #14130f;
+      --ink: #e7e3d8;
+      --muted: #a09a8e;
+      --line: rgba(255,255,255,.12);
+      --code-bg: #201f1a;
+      --accent: #e98c7c;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--paper); }
+  body {
+    font-family: -apple-system, "Noto Sans SC", "PingFang SC", system-ui, sans-serif;
+    color: var(--ink); -webkit-text-size-adjust: 100%;
+  }
+  main {
+    max-width: 720px; margin: 0 auto;
+    padding: 92px 20px calc(48px + env(safe-area-inset-bottom));
+    font-size: 16px; line-height: 1.78;
+    overflow-wrap: break-word;
+  }
+  h1, h2, h3, h4 { line-height: 1.34; letter-spacing: -.012em; margin: 1.7em 0 .6em; font-weight: 650; }
+  h1 { font-size: 1.72em; margin-top: .4em; }
+  h2 { font-size: 1.36em; padding-bottom: .3em; border-bottom: 1px solid var(--line); }
+  h3 { font-size: 1.14em; }
+  h4 { font-size: 1em; }
+  p { margin: .85em 0; }
+  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+  ul, ol { padding-left: 1.4em; margin: .8em 0; }
+  li { margin: .28em 0; }
+  li > ul, li > ol { margin: .2em 0; }
+  blockquote {
+    margin: 1em 0; padding: .2em 0 .2em 1em;
+    border-left: 3px solid var(--accent);
+    color: var(--muted);
+  }
+  code {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: .88em; background: var(--code-bg);
+    padding: .16em .38em; border-radius: 5px;
+  }
+  pre {
+    background: var(--code-bg); border-radius: 10px;
+    padding: 14px 16px; overflow-x: auto;
+    line-height: 1.6; margin: 1.1em 0;
+  }
+  pre code { background: none; padding: 0; font-size: .86em; }
+  table { border-collapse: collapse; width: 100%; margin: 1.1em 0; font-size: .94em; display: block; overflow-x: auto; }
+  th, td { border: 1px solid var(--line); padding: 7px 11px; text-align: left; }
+  th { background: var(--code-bg); font-weight: 600; }
+  img { max-width: 100%; height: auto; border-radius: 8px; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 2em 0; }
+  input[type=checkbox] { margin-right: .4em; }
+  #status {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    font-size: 13px; color: var(--muted); text-align: center;
+    background: linear-gradient(to top, var(--paper) 62%, transparent);
+    transition: opacity .18s ease-out; pointer-events: none;
+  }
+  #status.hide { opacity: 0; }
+</style>
+</head>
+<body>
+<main id="doc"></main>
+<div id="status">正在渲染…</div>
+
+<script src="./lib/marked.umd.js"></script>
+<script>
+const statusEl = document.getElementById('status');
+const docEl = document.getElementById('doc');
+
+async function main() {
+  const url = new URL('file', location.href).href;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('读取文件失败');
+  const text = await res.text();
+
+  marked.setOptions({ gfm: true, breaks: false, headerIds: false, mangle: false });
+  // 先渲染成 HTML 字符串，再剥掉脚本与内联事件，避免文档里的恶意内容被执行
+  const raw = marked.parse(text);
+  const clean = sanitize(raw);
+  docEl.innerHTML = clean;
+
+  docEl.querySelectorAll('a').forEach(a => { a.removeAttribute('href'); });
+  statusEl.classList.add('hide');
+}
+
+const ALLOWED_TAGS = new Set([
+  'A','P','BR','HR','H1','H2','H3','H4','H5','H6','UL','OL','LI','BLOCKQUOTE',
+  'PRE','CODE','EM','STRONG','DEL','INS','TABLE','THEAD','TBODY','TR','TH','TD',
+  'IMG','SPAN','DIV','INPUT','SUP','SUB','DETAILS','SUMMARY','KBD','MARK','S','U',
+]);
+
+function sanitize(html) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  const walk = (node) => {
+    const children = Array.from(node.childNodes);
+    for (const child of children) {
+      if (child.nodeType === 1) {
+        if (!ALLOWED_TAGS.has(child.tagName)) {
+          // 未知标签保留文字，丢弃标签本身
+          const text = document.createTextNode(child.textContent || '');
+          child.replaceWith(text);
+          continue;
+        }
+        for (const attr of Array.from(child.attributes)) {
+          const n = attr.name.toLowerCase();
+          const safe =
+            n === 'src' && child.tagName === 'IMG' && /^data:image\//.test(attr.value) ||
+            n === 'alt' || n === 'title' || n === 'class' ||
+            n === 'type' && child.tagName === 'INPUT' ||
+            n === 'checked' && child.tagName === 'INPUT' ||
+            n === 'disabled' && child.tagName === 'INPUT' ||
+            n === 'align' || n === 'start';
+          if (!safe) child.removeAttribute(attr.name);
+        }
+        walk(child);
+      } else if (child.nodeType === 8) {
+        child.remove();
+      } else if (child.nodeType === 3) {
+        // 纯文本，无需处理
+      }
+    }
+  };
+  walk(tpl.content);
+  return tpl.innerHTML;
+}
+
+main().catch(err => {
+  console.error(err);
+  statusEl.textContent = '无法渲染这个 Markdown 文件';
+});
+</script>
+</body>
+</html>

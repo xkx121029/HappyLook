@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=6,user-scalable=yes">
+<title>PDF</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --paper: #ffffff;
+    --ink: #1c1b19;
+    --backdrop: #f2efe8;
+    --line: rgba(0,0,0,.10);
+    --muted: #6e6a62;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #1b1a16;
+      --ink: #e7e3d8;
+      --backdrop: #100f0c;
+      --line: rgba(255,255,255,.12);
+      --muted: #a09a8e;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--backdrop); }
+  body {
+    font-family: -apple-system, "Noto Sans SC", "PingFang SC", system-ui, sans-serif;
+    color: var(--ink);
+    -webkit-text-size-adjust: 100%;
+  }
+  /* 顶部留出浮动信息条的高度，首屏内容不被挡住 */
+  #pages { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 92px 12px 48px; }
+  .sheet {
+    position: relative;
+    background: var(--paper);
+    box-shadow: 0 1px 2px rgba(0,0,0,.28), 0 8px 24px rgba(0,0,0,.10);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .sheet canvas { display: block; width: 100%; height: auto; }
+  .sheet .no {
+    position: absolute; right: 8px; bottom: 6px;
+    font-size: 11px; color: var(--muted);
+    background: color-mix(in srgb, var(--paper) 82%, transparent);
+    padding: 1px 6px; border-radius: 99px;
+    pointer-events: none;
+  }
+  #status {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    font-size: 13px; color: var(--muted);
+    text-align: center;
+    background: linear-gradient(to top, var(--backdrop) 62%, transparent);
+    transition: opacity .18s ease-out;
+    pointer-events: none;
+  }
+  #status.hide { opacity: 0; }
+  #fail {
+    display: none; padding: 56px 28px; text-align: center; font-size: 15px; line-height: 1.7;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+<div id="pages"></div>
+<div id="fail"></div>
+<div id="status">正在打开…</div>
+
+<script type="module">
+const statusEl = document.getElementById('status');
+const pagesEl = document.getElementById('pages');
+const failEl = document.getElementById('fail');
+
+function say(text) { statusEl.textContent = text; statusEl.classList.remove('hide'); }
+function fail(text) {
+  statusEl.classList.add('hide');
+  failEl.style.display = 'block';
+  failEl.textContent = text;
+}
+
+async function main() {
+  const pdfjs = await import('./lib/pdf.min.mjs');
+  pdfjs.GlobalWorkerOptions.workerSrc = './lib/pdf.worker.min.mjs';
+
+  const task = pdfjs.getDocument({
+    url: new URL('file', location.href).href,
+    // 页面里没有任何字体替代方案，禁用系统字体映射可以避免部分文档卡住
+    disableFontFace: false,
+    cMapUrl: undefined,
+    isEvalSupported: false,
+  });
+
+  const doc = await task.promise;
+  const total = doc.numPages;
+  say(`共 ${total} 页`);
+
+  // 先用首页测出可用宽度与页面比例，后续所有占位高度都按比例预先算好，
+  // 这样滚动条长度从一开始就是真实的，不会边滚边跳。
+  const first = await doc.getPage(1);
+  const base = first.getViewport({ scale: 1 });
+  const avail = Math.max(240, Math.min(window.innerWidth, 1200) - 24);
+  let scale = avail / base.width;
+  const ratio = base.height / base.width;
+
+  const sheets = [];
+  for (let i = 1; i <= total; i++) {
+    const div = document.createElement('div');
+    div.className = 'sheet';
+    div.style.width = avail + 'px';
+    div.style.height = Math.round(avail * ratio) + 'px';
+    div.dataset.page = String(i);
+    pagesEl.appendChild(div);
+    sheets.push(div);
+  }
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+  const rendered = new Set();
+  let rendering = false;
+  let pending = [];
+
+  async function renderPage(sheet) {
+    const num = Number(sheet.dataset.page);
+    if (rendered.has(num)) return;
+    const page = num === 1 ? first : await doc.getPage(num);
+    const viewport = page.getViewport({ scale: scale * dpr });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.floor(viewport.width);
+    canvas.height = Math.floor(viewport.height);
+    const ctx = canvas.getContext('2d', { alpha: false });
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    const no = document.createElement('span');
+    no.className = 'no';
+    no.textContent = `${num} / ${total}`;
+    sheet.replaceChildren(canvas, no);
+    sheet.style.height = 'auto';
+    rendered.add(num);
+  }
+
+  function pump() {
+    if (rendering) return;
+    rendering = true;
+    (async () => {
+      while (pending.length) {
+        const sheet = pending.shift();
+        try { await renderPage(sheet); } catch (e) { /* 单页失败不影响其他页 */ }
+      }
+      rendering = false;
+    })();
+  }
+
+  const observer = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      pending.push(e.target);
+      observer.unobserve(e.target);
+    }
+    // 近处的先画，远处的排队
+    pending.sort((a, b) => Number(a.dataset.page) - Number(b.dataset.page));
+    pump();
+  }, { rootMargin: '800px 0px' });
+
+  sheets.forEach(s => observer.observe(s));
+
+  await renderPage(sheets[0]);
+  statusEl.classList.add('hide');
+  sheets.slice(1).forEach(s => observer.observe(s));
+
+  window.addEventListener('resize', () => {
+    // 旋转屏幕后按新宽度重新排版占位，已渲染的页保持原样
+    const nextAvail = Math.max(240, Math.min(window.innerWidth, 1200) - 24);
+    sheets.forEach(s => {
+      s.style.width = nextAvail + 'px';
+      if (!rendered.has(Number(s.dataset.page))) {
+        s.style.height = Math.round(nextAvail * ratio) + 'px';
+      }
+    });
+  }, { passive: true });
+}
+
+main().catch(err => {
+  console.error(err);
+  const msg = String(err && err.message || err);
+  if (/password/i.test(msg)) fail('这个 PDF 有打开密码，暂时无法预览。');
+  else fail('无法解析这个 PDF 文件。\n' + msg);
+});
+</script>
+</body>
+</html>

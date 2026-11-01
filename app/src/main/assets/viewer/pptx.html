@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=6,user-scalable=yes">
+<title>演示</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --paper: #fbfaf7;
+    --ink: #1c1b19;
+    --muted: #6e6a62;
+    --backdrop: #f2efe8;
+    --line: rgba(0,0,0,.10);
+    --accent: #b23a2e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #14130f;
+      --ink: #e7e3d8;
+      --muted: #a09a8e;
+      --backdrop: #100f0c;
+      --line: rgba(255,255,255,.12);
+      --accent: #e98c7c;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--backdrop); }
+  body {
+    font-family: -apple-system, "Noto Sans SC", "PingFang SC", system-ui, sans-serif;
+    color: var(--ink); -webkit-text-size-adjust: 100%;
+  }
+  /* 顶部留出浮动信息条的高度，首屏内容不被挡住 */
+  #deck { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 92px 12px 40px; }
+  .slide {
+    position: relative; background: #fff; overflow: hidden;
+    /* 幻灯片底色固定为白，正文默认用深墨色，避免暗色模式下继承浅色文字 */
+    color: #1c1b19;
+    box-shadow: 0 1px 2px rgba(0,0,0,.28), 0 8px 24px rgba(0,0,0,.10);
+    border-radius: 3px;
+    flex: 0 0 auto;
+  }
+  .slide .layer { position: absolute; }
+  .slide .text {
+    white-space: pre-wrap; word-break: break-word;
+    line-height: 1.26; overflow: hidden;
+  }
+  .slide img {
+    width: 100%; height: 100%; object-fit: contain; display: block;
+  }
+  .slide table { border-collapse: collapse; width: 100%; height: 100%; table-layout: fixed; }
+  .slide td {
+    border: 1px solid rgba(0,0,0,.35);
+    padding: 3px 5px; font-size: 12px; vertical-align: top;
+    white-space: pre-wrap; word-break: break-word; overflow: hidden;
+  }
+  .badge {
+    position: absolute; left: 8px; bottom: 6px; z-index: 9;
+    font-size: 11px; color: var(--muted);
+    background: rgba(255,255,255,.82); padding: 1px 7px; border-radius: 99px;
+    pointer-events: none;
+  }
+  #status {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    font-size: 13px; color: var(--muted); text-align: center;
+    background: linear-gradient(to top, var(--backdrop) 62%, transparent);
+    transition: opacity .18s ease-out; pointer-events: none;
+  }
+  #status.hide { opacity: 0; }
+  #fail { display: none; padding: 56px 28px; text-align: center; font-size: 15px; line-height: 1.7; color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="deck"></div>
+<div id="fail"></div>
+<div id="status">正在解析演示文稿…</div>
+
+<script src="./lib/jszip.min.js"></script>
+<script>
+const deckEl = document.getElementById('deck');
+const statusEl = document.getElementById('status');
+const failEl = document.getElementById('fail');
+
+function fail(t) {
+  statusEl.classList.add('hide');
+  failEl.style.display = 'block';
+  failEl.textContent = t;
+}
+
+const NS = {
+  p: 'http://schemas.openxmlformats.org/presentationml/2006/main',
+  a: 'http://schemas.openxmlformats.org/drawingml/2006/main',
+  r: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+  rel: 'http://schemas.openxmlformats.org/package/2006/relationships',
+};
+
+function parseXml(text) {
+  return new DOMParser().parseFromString(text, 'application/xml');
+}
+function qAll(root, ns, tag) {
+  return Array.from(root.getElementsByTagNameNS(ns, tag));
+}
+function qFirst(root, ns, tag) {
+  return root.getElementsByTagNameNS(ns, tag)[0] || null;
+}
+function resolve(base, rel) {
+  const stack = base.split('/').filter(Boolean);
+  for (const seg of (rel || '').split('/')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') stack.pop(); else stack.push(seg);
+  }
+  return stack.join('/');
+}
+
+async function main() {
+  const url = new URL('file', location.href).href;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('读取文件失败');
+  const zip = await JSZip.loadAsync(await res.arrayBuffer());
+
+  // 幻灯片尺寸（EMU）
+  const presFile = zip.file('ppt/presentation.xml');
+  if (!presFile) throw new Error('不是有效的 PPTX 文件');
+  const pres = parseXml(await presFile.async('string'));
+  const sz = qFirst(pres, NS.p, 'sldSz');
+  const slideW = sz ? Number(sz.getAttribute('cx')) || 9144000 : 9144000;
+  const slideH = sz ? Number(sz.getAttribute('cy')) || 6858000 : 6858000;
+
+  // 幻灯片顺序来自 presentation 的 rels
+  const presRels = await readRels(zip, 'ppt/presentation.xml');
+  const order = [];
+  qAll(pres, NS.p, 'sldId').forEach(el => {
+    const rid = el.getAttribute('r:id');
+    const target = presRels[rid];
+    if (target) order.push(target);
+  });
+  if (!order.length) {
+    Object.keys(zip.files)
+      .filter(n => /^ppt\/slides\/slide\d+\.xml$/.test(n))
+      .sort((a, b) => Number(a.match(/(\d+)/)[1]) - Number(b.match(/(\d+)/)[1]))
+      .forEach(n => order.push(n));
+  }
+  if (!order.length) throw new Error('这个文件里没有幻灯片');
+
+  const avail = Math.max(240, Math.min(window.innerWidth, 1100) - 24);
+  const scale = avail / slideW;
+
+  // 主题配色，用于取不到显式颜色时的兜底
+  const theme = await readTheme(zip);
+
+  let index = 1;
+  for (const path of order) {
+    const file = zip.file(path);
+    if (!file) continue;
+    const xml = parseXml(await file.async('string'));
+    const rels = await readRels(zip, path);
+    const slide = await renderSlide(zip, xml, rels, {
+      width: avail,
+      height: slideH * scale,
+      scale, theme,
+    });
+    slide.dataset.page = String(index);
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = `${index} / ${order.length}`;
+    slide.appendChild(badge);
+    deckEl.appendChild(slide);
+    index++;
+
+    if (index % 6 === 0) {
+      statusEl.textContent = `已排版 ${index - 1} / ${order.length} 页`;
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+
+  statusEl.classList.add('hide');
+
+  window.addEventListener('resize', () => {
+    const w = Math.max(240, Math.min(window.innerWidth, 1100) - 24);
+    deckEl.querySelectorAll('.slide').forEach(s => {
+      const s2 = w / Number(s.dataset.emuW || slideW);
+      s.style.width = w + 'px';
+      s.style.height = (slideH * s2) + 'px';
+      s.querySelectorAll('[data-emu]').forEach(el => {
+        const [x, y, cw, ch] = el.dataset.emu.split(',').map(Number);
+        el.style.left = (x * s2) + 'px';
+        el.style.top = (y * s2) + 'px';
+        el.style.width = (cw * s2) + 'px';
+        el.style.height = (ch * s2) + 'px';
+        if (el.dataset.fontPt) el.style.fontSize = (Number(el.dataset.fontPt) * s2 * 12700) + 'px';
+      });
+    });
+  }, { passive: true });
+}
+
+async function readRels(zip, partPath) {
+  const dir = partPath.includes('/') ? partPath.slice(0, partPath.lastIndexOf('/')) : '';
+  const name = partPath.slice(partPath.lastIndexOf('/') + 1);
+  const relsPath = `${dir ? dir + '/' : ''}_rels/${name}.rels`;
+  const f = zip.file(relsPath);
+  if (!f) return {};
+  const xml = parseXml(await f.async('string'));
+  const map = {};
+  Array.from(xml.getElementsByTagNameNS(NS.rel, 'Relationship')).forEach(r => {
+    map[r.getAttribute('Id')] = resolve(dir, r.getAttribute('Target'));
+  });
+  return map;
+}
+
+async function readTheme(zip) {
+  // 只取主题里最常见的几个颜色槽位
+  const paths = Object.keys(zip.files).filter(n => /^ppt\/theme\/theme\d+\.xml$/.test(n)).sort();
+  const fallback = {
+    bg1: 'FFFFFF', tx1: '000000', tx2: '404040', accent1: '4472C4', accent2: 'ED7D31',
+  };
+  if (!paths.length) return fallback;
+  const xml = parseXml(await zip.file(paths[0]).async('string'));
+  const scheme = qFirst(xml, NS.a, 'clrScheme');
+  if (!scheme) return fallback;
+  const pick = (tag) => {
+    const node = qFirst(scheme, NS.a, tag);
+    if (!node) return null;
+    const srgb = qFirst(node, NS.a, 'srgbClr');
+    if (srgb) return srgb.getAttribute('val');
+    const sys = qFirst(node, NS.a, 'sysClr');
+    if (sys) return sys.getAttribute('lastClr') || '000000';
+    return null;
+  };
+  return {
+    bg1: pick('lt1') || fallback.bg1,
+    tx1: pick('dk1') || fallback.tx1,
+    tx2: pick('dk2') || fallback.tx2,
+    accent1: pick('accent1') || fallback.accent1,
+    accent2: pick('accent2') || fallback.accent2,
+  };
+}
+
+/** 从 XML 节点解析出 #rrggbb，支持 srgbClr 与 schemeClr。 */
+function readColor(node, theme) {
+  if (!node) return null;
+  const srgb = qFirst(node, NS.a, 'srgbClr');
+  if (srgb) return '#' + srgb.getAttribute('val');
+  const scheme = qFirst(node, NS.a, 'schemeClr');
+  if (scheme) {
+    const val = scheme.getAttribute('val');
+    const map = {
+      bg1: theme.bg1, lt1: theme.bg1, tx1: theme.tx1, dk1: theme.tx1,
+      tx2: theme.tx2, dk2: theme.tx2, accent1: theme.accent1, accent2: theme.accent2,
+    };
+    if (map[val]) return '#' + map[val];
+  }
+  return null;
+}
+
+function readXfrm(sp, theme) {
+  const xfrm = qFirst(sp, NS.a, 'xfrm') || sp.getElementsByTagNameNS(NS.p, 'xfrm')[0];
+  if (!xfrm) return null;
+  const off = qFirst(xfrm, NS.a, 'off');
+  const ext = qFirst(xfrm, NS.a, 'ext');
+  if (!off || !ext) return null;
+  return {
+    x: Number(off.getAttribute('x')) || 0,
+    y: Number(off.getAttribute('y')) || 0,
+    cx: Number(ext.getAttribute('cx')) || 0,
+    cy: Number(ext.getAttribute('cy')) || 0,
+    rot: Number(xfrm.getAttribute('rot')) || 0,
+  };
+}
+
+/** 解析段落的文本与样式，合并成一段 HTML。 */
+function readTextBody(txBody, theme, scale) {
+  const out = [];
+  for (const p of qAll(txBody, NS.a, 'p')) {
+    const pPr = qFirst(p, NS.a, 'pPr');
+    const align = pPr ? pPr.getAttribute('algn') : null;
+    const level = pPr ? Number(pPr.getAttribute('lvl')) || 0 : 0;
+    let line = '';
+    let maxPt = 18;
+    let bold = false;
+    let color = null;
+    for (const r of qAll(p, NS.a, 'r')) {
+      const rPr = qFirst(r, NS.a, 'rPr');
+      const t = qFirst(r, NS.a, 't');
+      const txt = t ? t.textContent : '';
+      if (rPr) {
+        const sz = Number(rPr.getAttribute('sz'));
+        if (sz > 0) maxPt = Math.max(maxPt, sz / 100);
+        if (rPr.getAttribute('b') === '1') bold = true;
+        const fill = qFirst(rPr, NS.a, 'solidFill');
+        if (fill) {
+          const c = readColor(fill, theme);
+          if (c) color = c;
+        }
+      }
+      line += escapeHtml(txt);
+    }
+    // 空段落保留一个换行，维持行距
+    if (!line) line = '&nbsp;';
+    out.push({
+      html: line,
+      align,
+      level,
+      pt: maxPt,
+      bold,
+      color,
+    });
+  }
+  return out;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]);
+}
+
+async function renderSlide(zip, xml, rels, opts) {
+  const { width, height, scale, theme } = opts;
+  const slide = document.createElement('div');
+  slide.className = 'slide';
+  slide.style.width = width + 'px';
+  slide.style.height = height + 'px';
+
+  // 背景
+  const bg = qFirst(xml, NS.p, 'bg');
+  if (bg) {
+    const bgPr = qFirst(bg, NS.p, 'bgPr');
+    const fill = bgPr ? qFirst(bgPr, NS.a, 'solidFill') : null;
+    const c = fill ? readColor(fill, theme) : null;
+    if (c) slide.style.background = c;
+  } else {
+    slide.style.background = '#fff';
+  }
+
+  const spTree = qFirst(xml, NS.p, 'spTree');
+  if (!spTree) return slide;
+
+  for (const child of Array.from(spTree.children)) {
+    const local = child.localName;
+    const ns = child.namespaceURI;
+
+    if (local === 'sp' && ns === NS.p) {
+      const xf = readXfrm(child, theme);
+      const filled = paintShape(child, theme);
+      const txBody = qFirst(child, NS.p, 'txBody');
+      const html = txBody ? readTextBody(txBody, theme, scale) : [];
+      if (!xf && !filled) continue;
+      const box = document.createElement('div');
+      box.className = 'layer';
+      if (xf) {
+        box.dataset.emu = `${xf.x},${xf.y},${xf.cx},${xf.cy}`;
+        box.style.left = (xf.x * scale) + 'px';
+        box.style.top = (xf.y * scale) + 'px';
+        box.style.width = (xf.cx * scale) + 'px';
+        box.style.height = (xf.cy * scale) + 'px';
+        if (xf.rot) box.style.transform = `rotate(${xf.rot / 60000}deg)`;
+      } else {
+        box.style.left = '0';
+        box.style.top = '0';
+        box.style.width = '100%';
+      }
+      if (filled) {
+        box.style.background = filled.fill || 'transparent';
+        if (filled.border) box.style.border = `1px solid ${filled.border}`;
+        if (filled.radius) box.style.borderRadius = filled.radius;
+      }
+      if (html.length) {
+        const textWrap = document.createElement('div');
+        textWrap.className = 'text';
+        textWrap.style.width = '100%';
+        textWrap.style.height = '100%';
+        textWrap.style.padding = '4px 6px';
+        const paras = html.map(h => {
+          const styles = [
+            `font-size:${(h.pt * scale * 12700).toFixed(1)}px`,
+            h.bold ? 'font-weight:700' : '',
+            h.color ? `color:${h.color}` : '',
+            h.align ? `text-align:${{ l: 'left', ctr: 'center', r: 'right', just: 'justify' }[h.align] || 'left'}` : '',
+            h.level ? `margin-left:${h.level * 18}px` : '',
+            'margin:0',
+          ].filter(Boolean).join(';');
+          return `<div style="${styles}">${h.html}</div>`;
+        }).join('');
+        textWrap.innerHTML = paras;
+        box.appendChild(textWrap);
+      }
+      slide.appendChild(box);
+
+    } else if (local === 'pic' && ns === NS.p) {
+      const xf = readXfrm(child, theme);
+      const blip = qFirst(child, NS.a, 'blip');
+      const embed = blip ? blip.getAttribute('r:embed') : null;
+      const target = embed ? rels[embed] : null;
+      if (!xf || !target) continue;
+      const f = zip.file(target);
+      if (!f) continue;
+      const ext = target.split('.').pop().toLowerCase();
+      const mime = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+                     bmp: 'image/bmp', svg: 'image/svg+xml', webp: 'image/webp' }[ext] || 'image/png';
+      const b64 = await f.async('base64');
+      const box = document.createElement('div');
+      box.className = 'layer';
+      box.dataset.emu = `${xf.x},${xf.y},${xf.cx},${xf.cy}`;
+      box.style.left = (xf.x * scale) + 'px';
+      box.style.top = (xf.y * scale) + 'px';
+      box.style.width = (xf.cx * scale) + 'px';
+      box.style.height = (xf.cy * scale) + 'px';
+      const img = document.createElement('img');
+      img.src = `data:${mime};base64,${b64}`;
+      box.appendChild(img);
+      slide.appendChild(box);
+
+    } else if (local === 'graphicFrame' && ns === NS.p) {
+      const xfrmNode = child.getElementsByTagNameNS(NS.p, 'xfrm')[0];
+      const tbl = qFirst(child, NS.a, 'tbl');
+      if (!xfrmNode || !tbl) continue;
+      const off = qFirst(xfrmNode, NS.a, 'off');
+      const ext = qFirst(xfrmNode, NS.a, 'ext');
+      if (!off || !ext) continue;
+      const x = Number(off.getAttribute('x')) || 0;
+      const y = Number(off.getAttribute('y')) || 0;
+      const cx = Number(ext.getAttribute('cx')) || 0;
+      const cy = Number(ext.getAttribute('cy')) || 0;
+
+      const table = document.createElement('table');
+      for (const tr of qAll(tbl, NS.a, 'tr')) {
+        const row = document.createElement('tr');
+        for (const tc of qAll(tr, NS.a, 'tc')) {
+          const cell = document.createElement('td');
+          // 合并单元格：只处理横向跨度
+          const span = tc.getAttribute('gridSpan');
+          if (span) cell.colSpan = Number(span);
+          const txBody = qFirst(tc, NS.a, 'txBody');
+          if (txBody) {
+            cell.innerHTML = readTextBody(txBody, theme, scale)
+              .map(h => `<div style="font-size:${(h.pt * scale * 12700).toFixed(1)}px${
+                h.bold ? ';font-weight:700' : ''}${h.color ? ';color:' + h.color : ''}">${h.html}</div>`)
+              .join('');
+          }
+          const fill = qFirst(tc, NS.a, 'solidFill');
+          const c = fill ? readColor(fill, theme) : null;
+          if (c) cell.style.background = c;
+          row.appendChild(cell);
+        }
+        table.appendChild(row);
+      }
+      const box = document.createElement('div');
+      box.className = 'layer';
+      box.dataset.emu = `${x},${y},${cx},${cy}`;
+      box.style.left = (x * scale) + 'px';
+      box.style.top = (y * scale) + 'px';
+      box.style.width = (cx * scale) + 'px';
+      box.style.height = (cy * scale) + 'px';
+      box.appendChild(table);
+      slide.appendChild(box);
+    }
+  }
+
+  return slide;
+}
+
+function paintShape(sp, theme) {
+  const spPr = qFirst(sp, NS.p, 'spPr');
+  if (!spPr) return null;
+  const solid = spPr.getElementsByTagNameNS(NS.a, 'solidFill')[0];
+  const fill = solid ? readColor(solid, theme) : null;
+  const ln = qFirst(spPr, NS.a, 'ln');
+  let border = null;
+  if (ln) {
+    const lnFill = ln.getElementsByTagNameNS(NS.a, 'solidFill')[0];
+    border = lnFill ? readColor(lnFill, theme) : null;
+  }
+  const geom = qFirst(spPr, NS.a, 'prstGeom');
+  let radius = null;
+  if (geom && /roundRect/i.test(geom.getAttribute('prst') || '')) radius = '6px';
+  if (!fill && !border) return null;
+  return { fill: fill || 'transparent', border, radius };
+}
+
+main().catch(err => {
+  console.error(err);
+  fail('无法打开这个演示文稿。\n' + String(err && err.message || err));
+});
+</script>
+</body>
+</html>

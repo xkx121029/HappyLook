@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  图标：一张折角纸 + 一枚朱红印章。
+  不做渐变、不做发光，在桌面小尺寸下也能一眼认出来。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 纸张主体 -->
+    <path
+        android:fillColor="#FBFAF7"
+        android:pathData="M40,26h20l12,12v44a4,4 0 0 1,-4,4h-28a4,4 0 0 1,-4,-4V30a4,4 0 0 1,4,-4z" />
+
+    <!-- 折角 -->
+    <path
+        android:fillColor="#CFCABF"
+        android:pathData="M60,26l12,12h-8a4,4 0 0 1,-4,-4z" />
+
+    <!-- 文字行 -->
+    <path
+        android:fillColor="#1C1B19"
+        android:fillAlpha="0.30"
+        android:pathData="M44,46h22v3h-22z" />
+    <path
+        android:fillColor="#1C1B19"
+        android:fillAlpha="0.30"
+        android:pathData="M44,54h22v3h-22z" />
+    <path
+        android:fillColor="#1C1B19"
+        android:fillAlpha="0.30"
+        android:pathData="M44,62h13v3h-13z" />
+
+    <!-- 朱红印章 -->
+    <path
+        android:fillColor="#B23A2E"
+        android:pathData="M62,68m-7,0a7,7 0 1,0 14,0a7,7 0 1,0 -14,0" />
+</vector>

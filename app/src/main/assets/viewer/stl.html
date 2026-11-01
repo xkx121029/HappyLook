@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=2,user-scalable=no">
+<title>3D 模型</title>
+<style>
+  :root { color-scheme: light dark; --backdrop: #f2efe8; --ink: #1c1b19; --muted: #6e6a62; --line: rgba(0,0,0,.12); }
+  @media (prefers-color-scheme: dark) {
+    :root { --backdrop: #100f0c; --ink: #e7e3d8; --muted: #a09a8e; --line: rgba(255,255,255,.14); }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: var(--backdrop); }
+  body {
+    font-family: -apple-system, "Noto Sans SC", system-ui, sans-serif;
+    color: var(--ink); touch-action: none;
+  }
+  canvas { display: block; width: 100%; height: 100%; }
+  #hint {
+    position: fixed; left: 0; right: 0; bottom: calc(16px + env(safe-area-inset-bottom));
+    text-align: center; font-size: 12px; color: var(--muted);
+    pointer-events: none; transition: opacity .3s ease-out;
+  }
+  #info {
+    position: fixed; left: 16px; bottom: calc(40px + env(safe-area-inset-bottom));
+    font-size: 12px; color: var(--muted); pointer-events: none;
+    font-variant-numeric: tabular-nums; transition: opacity .3s ease-out;
+  }
+  #fail { display: none; padding: 56px 28px; text-align: center; font-size: 15px; line-height: 1.7; color: var(--muted); }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="info"></div>
+<div id="hint">单指转动 · 双指缩放 · 双击复位</div>
+<div id="fail"></div>
+
+<script src="./lib/jszip.min.js"></script>
+<script>
+const canvas = document.getElementById('view');
+const failEl = document.getElementById('fail');
+const infoEl = document.getElementById('info');
+const hintEl = document.getElementById('hint');
+
+function fail(t) {
+  hintEl.style.display = 'none';
+  failEl.style.display = 'block';
+  failEl.textContent = t;
+}
+
+const gl = canvas.getContext('webgl', {
+  antialias: true, alpha: true, preserveDrawingBuffer: false,
+});
+if (!gl) fail('这台设备的 WebView 不支持 WebGL，无法显示 3D 模型。');
+
+const VS = `
+attribute vec3 aPos;
+attribute vec3 aNormal;
+uniform mat4 uMvp;
+uniform mat4 uModel;
+uniform vec3 uLight;
+varying vec3 vNormal;
+varying vec3 vWorld;
+void main() {
+  vec4 world = uModel * vec4(aPos, 1.0);
+  vWorld = world.xyz;
+  vNormal = mat3(uModel) * aNormal;
+  gl_Position = uMvp * vec4(aPos, 1.0);
+}`;
+
+const FS = `
+precision mediump float;
+varying vec3 vNormal;
+varying vec3 vWorld;
+uniform vec3 uLight;
+uniform vec3 uColor;
+uniform vec3 uEye;
+void main() {
+  vec3 n = normalize(vNormal);
+  vec3 lightDir = normalize(uLight - vWorld);
+  float diff = max(dot(n, lightDir), 0.0);
+  // 加一点边缘光，让暗部不至于糊成一片
+  vec3 viewDir = normalize(uEye - vWorld);
+  float rim = pow(1.0 - max(dot(n, viewDir), 0.0), 2.6) * 0.34;
+  vec3 base = uColor * (0.30 + 0.70 * diff);
+  gl_FragColor = vec4(base + rim, 1.0);
+}`;
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    throw new Error(gl.getShaderInfoLog(s) || '着色器编译失败');
+  }
+  return s;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+  fail('无法初始化渲染管线');
+}
+gl.useProgram(prog);
+
+const loc = {
+  aPos: gl.getAttribLocation(prog, 'aPos'),
+  aNormal: gl.getAttribLocation(prog, 'aNormal'),
+  uMvp: gl.getUniformLocation(prog, 'uMvp'),
+  uModel: gl.getUniformLocation(prog, 'uModel'),
+  uLight: gl.getUniformLocation(prog, 'uLight'),
+  uColor: gl.getUniformLocation(prog, 'uColor'),
+  uEye: gl.getUniformLocation(prog, 'uEye'),
+};
+
+function mat4Identity() { return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]); }
+
+function mat4Multiply(a, b) {
+  const o = new Float32Array(16);
+  for (let i = 0; i < 4; i++) {
+    for (let j = 0; j < 4; j++) {
+      let s = 0;
+      for (let k = 0; k < 4; k++) s += a[k * 4 + j] * b[i * 4 + k];
+      o[i * 4 + j] = s;
+    }
+  }
+  return o;
+}
+
+function perspective(fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2);
+  const nf = 1 / (near - far);
+  return new Float32Array([
+    f / aspect, 0, 0, 0,
+    0, f, 0, 0,
+    0, 0, (far + near) * nf, -1,
+    0, 0, 2 * far * near * nf, 0,
+  ]);
+}
+
+function lookAt(eye, center, up) {
+  const z = norm(sub(eye, center));
+  const x = norm(cross(up, z));
+  const y = cross(z, x);
+  return new Float32Array([
+    x[0], y[0], z[0], 0,
+    x[1], y[1], z[1], 0,
+    x[2], y[2], z[2], 0,
+    -dot(x, eye), -dot(y, eye), -dot(z, eye), 1,
+  ]);
+}
+
+function rotY(a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return new Float32Array([c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]);
+}
+function rotX(a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return new Float32Array([1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]);
+}
+function scaleM(s) {
+  return new Float32Array([s,0,0,0, 0,s,0,0, 0,0,s,0, 0,0,0,1]);
+}
+const sub = (a, b) => [a[0]-b[0], a[1]-b[1], a[2]-b[2]];
+const cross = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+const dot = (a, b) => a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+function norm(a) {
+  const l = Math.hypot(a[0], a[1], a[2]) || 1;
+  return [a[0]/l, a[1]/l, a[2]/l];
+}
+
+/** 解析 STL：ASCII 与二进制两种格式都支持，靠内容而不是扩展名判断。 */
+async function loadStl(buf) {
+  const bytes = new Uint8Array(buf);
+  // 二进制 STL 的长度可以精确对上：84 + 50 * 三角面数
+  if (bytes.length >= 84) {
+    const dv = new DataView(buf);
+    const count = dv.getUint32(80, true);
+    if (bytes.length === 84 + count * 50) return parseBinaryStl(dv, count);
+  }
+  // 否则当文本处理
+  const head = new TextDecoder('utf-8').decode(bytes.slice(0, Math.min(2048, bytes.length)));
+  if (/solid/i.test(head) && /facet/i.test(head)) {
+    return parseAsciiStl(new TextDecoder('utf-8').decode(bytes));
+  }
+  // 头部没有 solid 也可能是 ASCII，最后再试一次二进制
+  if (bytes.length >= 84) {
+    const dv = new DataView(buf);
+    const count = dv.getUint32(80, true);
+    if (count > 0 && 84 + count * 50 <= bytes.length) return parseBinaryStl(dv, count);
+  }
+  throw new Error('无法识别这个 STL 的结构');
+}
+
+function parseBinaryStl(dv, count) {
+  const positions = new Float32Array(count * 9);
+  const normals = new Float32Array(count * 9);
+  let p = 84;
+  for (let i = 0; i < count; i++) {
+    const nx = dv.getFloat32(p, true);
+    const ny = dv.getFloat32(p + 4, true);
+    const nz = dv.getFloat32(p + 8, true);
+    p += 12;
+    for (let v = 0; v < 3; v++) {
+      const x = dv.getFloat32(p, true);
+      const y = dv.getFloat32(p + 4, true);
+      const z = dv.getFloat32(p + 8, true);
+      p += 12;
+      const o = i * 9 + v * 3;
+      positions[o] = x; positions[o + 1] = y; positions[o + 2] = z;
+      normals[o] = nx; normals[o + 1] = ny; normals[o + 2] = nz;
+    }
+    p += 2;
+  }
+  return { positions, normals, triangles: count };
+}
+
+function parseAsciiStl(text) {
+  const positions = [];
+  const normals = [];
+  const re = /facet\s+normal\s+([-\d.eE+]+)\s+([-\d.eE+]+)\s+([-\d.eE+]+)[\s\S]*?vertex\s+([-\d.eE+]+)\s+([-\d.eE+]+)\s+([-\d.eE+]+)[\s\S]*?vertex\s+([-\d.eE+]+)\s+([-\d.eE+]+)\s+([-\d.eE+]+)[\s\S]*?vertex\s+([-\d.eE+]+)\s+([-\d.eE+]+)\s+([-\d.eE+]+)/gi;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const nx = +m[1], ny = +m[2], nz = +m[3];
+    for (let v = 0; v < 3; v++) {
+      const base = 4 + v * 3;
+      positions.push(+m[base], +m[base + 1], +m[base + 2]);
+      normals.push(nx, ny, nz);
+    }
+  }
+  if (!positions.length) throw new Error('文件里没有找到三角面数据');
+  return {
+    positions: new Float32Array(positions),
+    normals: new Float32Array(normals),
+    triangles: positions.length / 9,
+  };
+}
+
+function computeNormals(positions) {
+  // 二进制 STL 的法线有时全是 0，这时按顶点顺序现算一遍
+  const out = new Float32Array(positions.length);
+  for (let i = 0; i < positions.length; i += 9) {
+    const ax = positions[i], ay = positions[i+1], az = positions[i+2];
+    const bx = positions[i+3], by = positions[i+4], bz = positions[i+5];
+    const cx = positions[i+6], cy = positions[i+7], cz = positions[i+8];
+    const ux = bx-ax, uy = by-ay, uz = bz-az;
+    const vx = cx-ax, vy = cy-ay, vz = cz-az;
+    const nx = uy*vz - uz*vy;
+    const ny = uz*vx - ux*vz;
+    const nz = ux*vy - uy*vx;
+    const l = Math.hypot(nx, ny, nz) || 1;
+    for (let v = 0; v < 3; v++) {
+      out[i + v*3] = nx/l;
+      out[i + v*3 + 1] = ny/l;
+      out[i + v*3 + 2] = nz/l;
+    }
+  }
+  return out;
+}
+
+let state = {
+  angleX: -0.42,
+  angleY: 0.62,
+  zoom: 1,
+  radius: 1,
+  center: [0, 0, 0],
+  vao: null,
+  vertexCount: 0,
+};
+
+function uploadMesh(mesh) {
+  let normals = mesh.normals;
+  const allZero = normals.length === 0 || normals.every(v => v === 0);
+  if (allZero) normals = computeNormals(mesh.positions);
+
+  // 居中并归一化尺寸，任何模型都按同样大小显示
+  const pos = mesh.positions;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < pos.length; i += 3) {
+    minX = Math.min(minX, pos[i]); maxX = Math.max(maxX, pos[i]);
+    minY = Math.min(minY, pos[i+1]); maxY = Math.max(maxY, pos[i+1]);
+    minZ = Math.min(minZ, pos[i+2]); maxZ = Math.max(maxZ, pos[i+2]);
+  }
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2;
+  const extent = Math.max(maxX - minX, maxY - minY, maxZ - minZ) || 1;
+  const scaleFactor = 2 / extent;
+  state.center = [0, 0, 0];
+  state.radius = Math.max(
+    (maxX - minX), (maxY - minY), (maxZ - minZ),
+  ) / 2;
+
+  const n = pos.length / 3;
+  const centered = new Float32Array(pos.length);
+  for (let i = 0; i < n; i++) {
+    centered[i*3] = (pos[i*3] - cx) * scaleFactor;
+    centered[i*3+1] = (pos[i*3+1] - cy) * scaleFactor;
+    centered[i*3+2] = (pos[i*3+2] - cz) * scaleFactor;
+  }
+
+  const posBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, centered, gl.STATIC_DRAW);
+
+  const normBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, normBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, normals.slice(0, centered.length), gl.STATIC_DRAW);
+
+  state.vertexCount = n;
+  return { posBuf, normBuf };
+}
+
+function draw(buffers) {
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  if (canvas.width !== Math.floor(w * dpr) || canvas.height !== Math.floor(h * dpr)) {
+    canvas.width = Math.floor(w * dpr);
+    canvas.height = Math.floor(h * dpr);
+  }
+  gl.viewport(0, 0, canvas.width, canvas.height);
+
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  gl.clearColor(dark ? 0.063 : 0.949, dark ? 0.059 : 0.937, dark ? 0.047 : 0.910, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST);
+
+  const dist = 3.4 * state.zoom;
+  const eye = [0, 0, dist];
+  const proj = perspective(Math.PI / 4, w / h, 0.05, 100);
+  const view = lookAt(eye, [0, 0, 0], [0, 1, 0]);
+  const model = mat4Multiply(rotX(state.angleX), rotY(state.angleY));
+  const mvp = mat4Multiply(proj, mat4Multiply(view, model));
+
+  gl.uniformMatrix4fv(loc.uMvp, false, mvp);
+  gl.uniformMatrix4fv(loc.uModel, false, model);
+  gl.uniform3f(loc.uLight, 2.4, 3.4, 3.6);
+  gl.uniform3f(loc.uEye, eye[0], eye[1], eye[2]);
+  gl.uniform3f(loc.uColor, dark ? 0.86 : 0.70, dark ? 0.55 : 0.42, dark ? 0.50 : 0.38);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffers.posBuf);
+  gl.enableVertexAttribArray(loc.aPos);
+  gl.vertexAttribPointer(loc.aPos, 3, gl.FLOAT, false, 0, 0);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffers.normBuf);
+  gl.enableVertexAttribArray(loc.aNormal);
+  gl.vertexAttribPointer(loc.aNormal, 3, gl.FLOAT, false, 0, 0);
+
+  gl.drawArrays(gl.TRIANGLES, 0, state.vertexCount);
+  requestAnimationFrame(() => draw(buffers));
+}
+
+// 手势：单指转，双指缩放，双击复位
+let dragging = false;
+let lastX = 0, lastY = 0;
+let pinchStart = 0, zoomStart = 1;
+
+canvas.addEventListener('pointerdown', e => {
+  if (e.pointerType === 'touch' && e.isPrimary === false) return;
+  dragging = true;
+  lastX = e.clientX; lastY = e.clientY;
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const dx = e.clientX - lastX;
+  const dy = e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  state.angleY += dx * 0.008;
+  state.angleX = Math.max(-1.5, Math.min(1.5, state.angleX + dy * 0.008));
+});
+const stopDrag = e => {
+  dragging = false;
+  if (e && e.pointerId != null) {
+    try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+  }
+};
+canvas.addEventListener('pointerup', stopDrag);
+canvas.addEventListener('pointercancel', stopDrag);
+canvas.addEventListener('pointerleave', stopDrag);
+
+canvas.addEventListener('touchstart', e => {
+  if (e.touches.length === 2) {
+    dragging = false;
+    pinchStart = Math.hypot(
+      e.touches[0].clientX - e.touches[1].clientX,
+      e.touches[0].clientY - e.touches[1].clientY,
+    );
+    zoomStart = state.zoom;
+  }
+}, { passive: true });
+
+canvas.addEventListener('touchmove', e => {
+  if (e.touches.length === 2 && pinchStart > 0) {
+    const d = Math.hypot(
+      e.touches[0].clientX - e.touches[1].clientX,
+      e.touches[0].clientY - e.touches[1].clientY,
+    );
+    state.zoom = Math.max(0.45, Math.min(4, zoomStart * (pinchStart / d)));
+    e.preventDefault();
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', () => { pinchStart = 0; });
+
+canvas.addEventListener('dblclick', () => {
+  state.angleX = -0.42;
+  state.angleY = 0.62;
+  state.zoom = 1;
+});
+
+// 滚轮缩放，方便在桌面与投屏环境里用
+canvas.addEventListener('wheel', e => {
+  state.zoom = Math.max(0.45, Math.min(4, state.zoom * (1 + Math.sign(e.deltaY) * 0.08)));
+  e.preventDefault();
+}, { passive: false });
+
+async function main() {
+  const url = new URL('file', location.href).href;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('读取文件失败');
+  const buf = await res.arrayBuffer();
+  const mesh = await loadStl(buf);
+  const buffers = uploadMesh(mesh);
+
+  infoEl.textContent = `${mesh.triangles.toLocaleString()} 个三角面`;
+
+  if (mesh.triangles === 0) throw new Error('模型是空的');
+
+  draw(buffers);
+  setTimeout(() => {
+    hintEl.style.opacity = '0';
+    infoEl.style.opacity = '0';
+  }, 3800);
+}
+
+main().catch(err => {
+  console.error(err);
+  fail('无法显示这个 3D 模型。\n' + String(err && err.message || err));
+});
+</script>
+</body>
+</html>
